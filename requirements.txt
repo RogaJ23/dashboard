@@ -1,0 +1,8 @@
+streamlit>=1.40
+pandas
+sqlalchemy>=2.0
+psycopg2-binary
+python-dotenv
+spotipy
+gradescopeapi
+requests
