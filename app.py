@@ -1,5 +1,9 @@
 """Streamlit dashboard. Run with: streamlit run app.py"""
 import os
+import re
+from datetime import datetime, time
+from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -52,6 +56,90 @@ with tab_assign:
         """
     )
     st.dataframe(upcoming, use_container_width=True, hide_index=True)
+
+    # ---- Manual deadlines (for courses with no API or calendar feed) ----
+    st.divider()
+    st.subheader("Add a deadline manually")
+
+    existing_courses = pd.read_sql(
+        text("SELECT id, name FROM courses WHERE id LIKE 'manual:%' ORDER BY name"),
+        engine(),
+    )
+    NEW_COURSE = "+ New course"
+    course_options = list(existing_courses["name"]) + [NEW_COURSE]
+
+    with st.form("add_assignment", clear_on_submit=True):
+        choice = st.selectbox("Course", course_options)
+        new_course_name = st.text_input("New course name (only if you picked + New course)")
+        a_title = st.text_input("Assignment")
+        a_date = st.date_input("Due date", value=None)
+        a_time = st.time_input("Due time", value=time(23, 59))
+        add_clicked = st.form_submit_button("Add deadline", disabled=DEMO)
+
+    if add_clicked:
+        course_name = new_course_name.strip() if choice == NEW_COURSE else choice
+        if not course_name or not a_title.strip() or a_date is None:
+            st.warning("Course, assignment, and due date are required.")
+        else:
+            course_id = "manual:" + re.sub(r"[^a-z0-9]+", "-", course_name.lower()).strip("-")
+            due_at = datetime.combine(a_date, a_time).replace(tzinfo=ZoneInfo(TZ))
+            with engine().begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO courses (id, name, term) VALUES (:i, :n, 'Manual') "
+                        "ON CONFLICT (id) DO NOTHING"
+                    ),
+                    {"i": course_id, "n": course_name},
+                )
+                conn.execute(
+                    text(
+                        "INSERT INTO assignments (id, course_id, title, due_at, status) "
+                        "VALUES (:id, :c, :t, :d, 'Not submitted')"
+                    ),
+                    {
+                        "id": f"{course_id}:{uuid4().hex[:8]}",
+                        "c": course_id,
+                        "t": a_title.strip(),
+                        "d": due_at,
+                    },
+                )
+            st.cache_data.clear()
+            st.rerun()
+
+    manual = pd.read_sql(
+        text(
+            """
+            SELECT a.id, c.name AS course, a.title, a.status,
+                   (a.due_at AT TIME ZONE :tz) AS due
+            FROM assignments a JOIN courses c ON c.id = a.course_id
+            WHERE a.id LIKE 'manual:%'
+            ORDER BY a.due_at DESC LIMIT 30
+            """
+        ),
+        engine(),
+        params={"tz": TZ},
+    )
+    if not manual.empty:
+        st.caption("Your manual deadlines")
+        for _, r in manual.iterrows():
+            c1, c2, c3 = st.columns([6, 1, 1])
+            c1.write(f"{r['course']}: {r['title']} (due {r['due']:%b %d, %I:%M %p}) - {r['status']}")
+            if c2.button("Done", key=f"adone_{r['id']}", disabled=DEMO):
+                with engine().begin() as conn:
+                    conn.execute(
+                        text("UPDATE assignments SET status = 'Submitted' WHERE id = :i"),
+                        {"i": r["id"]},
+                    )
+                st.cache_data.clear()
+                st.rerun()
+            if c3.button("Delete", key=f"adel_{r['id']}", disabled=DEMO):
+                with engine().begin() as conn:
+                    conn.execute(
+                        text("DELETE FROM assignments WHERE id = :i"),
+                        {"i": r["id"]},
+                    )
+                st.cache_data.clear()
+                st.rerun()
 
 # ------------------------------------------------------------------ Listening
 with tab_music:
