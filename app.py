@@ -1,12 +1,15 @@
 """Streamlit dashboard. Run with: streamlit run app.py"""
+import json
 import os
 import re
+from pathlib import Path
 from datetime import datetime, time
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from sqlalchemy import text
 
 from db import get_engine
@@ -28,7 +31,151 @@ def query(sql: str, params: dict | None = None) -> pd.DataFrame:
     return pd.read_sql(text(sql), engine(), params=p)
 
 
+# ------------------------------------------------------------------- Theming
+THEMES = {
+    # name: (gradient start, gradient end, text color, accent color)
+    "Warm paper": ("#fbf3e4", "#f3dfc1", "#4a3b32", "#c26d3d"),
+    "Peach sunset": ("#ffe8d6", "#e8d5f2", "#4a3340", "#d4658a"),
+    "Matcha": ("#eef3e2", "#d6e5c4", "#34402f", "#6b8f4e"),
+    "Lavender dusk": ("#efe9f8", "#f8e4ee", "#3d3450", "#8a6bbd"),
+}
+
+# Injects a muted, looping <video> behind the app. Skipped on small screens and when
+# the browser asks for reduced motion. __SRC__ and __ON__ are filled in by Python.
+VIDEO_JS = """
+<script>
+(function () {
+  const doc = window.parent.document;
+  const ID = "cozy-bg-video";
+  const src = __SRC__;
+  const on = __ON__;
+  const old = doc.getElementById(ID);
+  const reduce = window.parent.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const small = window.parent.innerWidth < 700;
+  if (!src || !on || reduce || small) { if (old) old.remove(); return; }
+  if (old && old.dataset.src === src) return;
+  if (old) old.remove();
+  const v = doc.createElement("video");
+  v.id = ID;
+  v.dataset.src = src;
+  v.src = src;
+  v.muted = true;
+  v.defaultMuted = true;
+  v.loop = true;
+  v.autoplay = true;
+  v.playsInline = true;
+  v.setAttribute("muted", "");
+  v.setAttribute("playsinline", "");
+  Object.assign(v.style, {
+    position: "fixed", top: "0", left: "0", width: "100vw", height: "100vh",
+    objectFit: "cover", zIndex: "-1", pointerEvents: "none"
+  });
+  doc.body.prepend(v);
+  const p = v.play();
+  if (p && p.catch) p.catch(function () {});
+})();
+</script>
+"""
+
+with st.sidebar:
+    st.header("Make it cozy")
+    theme_name = st.selectbox("Theme", list(THEMES), index=0)
+    bg_url = st.text_input("Background image URL (optional)", placeholder="https://...")
+    bg_video_url = st.text_input(
+        "Background video URL (optional, .mp4)",
+        placeholder="or put static/background.mp4 in the project",
+    )
+    video_on = st.toggle("Play background video", value=True)
+    card_a = st.slider("Panel opacity", 0.30, 0.95, 0.60, 0.05)
+
+    # Video source: an https URL if given, else the local static/background.mp4.
+    LOCAL_VIDEO = Path(__file__).with_name("static") / "background.mp4"
+    _vurl = bg_video_url.strip()
+    if _vurl and re.fullmatch(r"https://[^\s\"'()<>\\]+", _vurl):
+        video_src = _vurl
+    elif LOCAL_VIDEO.exists():
+        video_src = "/app/static/background.mp4"
+    else:
+        video_src = ""
+
+    components.html(
+        VIDEO_JS.replace("__SRC__", json.dumps(video_src)).replace(
+            "__ON__", "true" if video_on else "false"
+        ),
+        height=0,
+    )
+
+bg1, bg2, fg, accent = THEMES[theme_name]
+bg_css = f"linear-gradient(135deg, {bg1}, {bg2})"
+# Only accept plain https URLs so nothing odd can be injected into the CSS.
+if bg_url and re.fullmatch(r"https://[^\s\"'()<>]+", bg_url.strip()):
+    bg_css = (
+        "linear-gradient(rgba(255,250,240,0.30), rgba(255,250,240,0.30)), "
+        f"url('{bg_url.strip()}') center/cover fixed"
+    )
+
+st.markdown(
+    f"""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Fraunces:wght@600&family=Nunito:wght@400;600;700&display=swap');
+    /* The preset gradient / image lives on <html> so a background video can sit
+       between it and the app. If no video plays, the gradient simply shows. */
+    html {{
+        background: {bg_css};
+        background-attachment: fixed;
+    }}
+    body, .stApp,
+    [data-testid="stAppViewContainer"],
+    [data-testid="stMain"] {{
+        background: transparent !important;
+    }}
+    .stApp {{
+        color: {fg};
+        font-family: 'Nunito', sans-serif;
+    }}
+    [data-testid="stHeader"] {{ background: transparent; }}
+    [data-testid="stSidebar"] {{
+        background: rgba(255, 251, 245, {card_a});
+        backdrop-filter: blur(10px);
+    }}
+    .block-container {{
+        background: rgba(255, 251, 245, {card_a});
+        backdrop-filter: blur(10px);
+        border-radius: 20px;
+        padding: 2rem 2.5rem;
+        margin: 1rem auto;
+        max-width: 1100px !important;
+        box-shadow: 0 8px 30px rgba(80, 50, 30, 0.12);
+    }}
+    h1, h2, h3 {{ font-family: 'Fraunces', serif; color: {fg}; }}
+    .stApp p, .stApp label {{ color: {fg}; }}
+    .stButton > button, .stFormSubmitButton > button {{
+        border-radius: 999px;
+        border: 1px solid {accent};
+        color: {accent};
+        background: transparent;
+    }}
+    .stButton > button:hover, .stFormSubmitButton > button:hover {{
+        background: {accent};
+        color: white;
+        border-color: {accent};
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.title("My Dashboard")
+
+_last_sync = query(
+    "SELECT source, max(ran_at AT TIME ZONE :tz) AS last_run "
+    "FROM sync_runs WHERE error IS NULL GROUP BY source ORDER BY source"
+)
+if not _last_sync.empty:
+    st.caption(
+        "Last synced: "
+        + " · ".join(f"{r.source} {r.last_run:%b %d, %I:%M %p}" for r in _last_sync.itertuples())
+    )
 if DEMO:
     st.info("Demo mode: showing sample data. Writes are disabled.")
 
